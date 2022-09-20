@@ -87,6 +87,10 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
         # train target model
         log.debug("Fitting target model")
         model.fit(X_train, y_train)
+        score = model.score(X_test, y_test)
+        with open("model_performance", "w", encoding="utf-8") as file:
+            file.write(f"##### Epoch {epoch} #####\n")
+            file.write(f"mean accuracy of model: {score}")
 
         # generate counterfactuals and save in counterfactuals list
         for index in range(X_train.shape[0]):
