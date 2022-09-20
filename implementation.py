@@ -88,7 +88,7 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
         log.debug("Fitting target model")
         model.fit(X_train, y_train)
         score = model.score(X_test, y_test)
-        with open("model_performance", "w", mode="a", encoding="utf-8") as file:
+        with open("model_performance", "a", encoding="utf-8") as file:
             file.write(f"##### Epoch {epoch} #####\n")
             file.write(f"mean accuracy of model: {score}")
 
