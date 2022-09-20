@@ -1,0 +1,4 @@
+.devcontainer/
+.vscode/
+data/
+src/__pycache__/*
