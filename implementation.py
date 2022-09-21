@@ -1,3 +1,4 @@
+from genericpath import isfile
 from xmlrpc.client import Boolean
 import dice_ml
 import inquirer
@@ -24,6 +25,9 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
     log.debug(f"Looking in {DATA_PATH} for data files (assuming \".data\" and \".test\" as file endings)")
 
     OUTPUT_PATH = Path() / output_path
+    model_logfile = OUTPUT_PATH / "model_performance"
+    if model_logfile.is_file():
+        open(file=model_logfile, mode="w").close()
 
     # read dataset from data_path (assuming ".data" and ".test" as file endings)
     data_files = sorted([str(file.name) for file in Path(DATA_PATH).glob("*.data")], key=str.lower)
@@ -90,10 +94,10 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
         log.debug("Fitting target model")
         model.fit(X_train, y_train)
         score = model.score(X_test, y_test)
-        mp_f = OUTPUT_PATH / "model_performance"
-        with open(file=mp_f, mode="a", encoding="utf-8") as file:
+        
+        with open(file=model_logfile, mode="a", encoding="utf-8") as file:
             file.write(f"##### Epoch {epoch} #####\n")
-            file.write(f"mean accuracy of model: {score}")
+            file.write(f"mean accuracy of model: {score}\n")
 
         # generate counterfactuals and save in counterfactuals list
         for index in range(X_train.shape[0]):
@@ -207,8 +211,11 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
 
     cf_f = OUTPUT_PATH / "counterfactuals"
     with open(file=cf_f, mode="w", encoding="utf-8") as file:
+        for feature in data_processor.initial_features:
+            file.write(feature + ",")
+        file.write("\n")
         for cf in corrected_cfs:
-            file.write(cf + "/n")
+            file.write(cf + "\n")
 
     log.info("Finished training the target model")
 
@@ -233,8 +240,20 @@ def main():
     # arguments: model
     # optional arguments: data_folder, counterfactual generator, rounds
     # technical optional arguments: seed, log-level
+
+    # dev_path = Path()/"data"/"adult_income"/"small"
+    dev_path = Path()/"data"/"adult_income"
+    output_path = Path()/"data"/"output"
+
+    logfile = output_path / "logfile"
+    # clear logfile
+    open(logfile, "w").close()
     
-    log.basicConfig(format='%(levelname)s: %(message)s', level=log.DEBUG)
+    log.basicConfig(filename=logfile,
+                    filemode="a",
+                    format="%(asctime)s %(levelname)s: %(message)s", 
+                    datefmt="%d/%m/%Y %H:%M",
+                    level=log.DEBUG)
     log.info("Start program")
     log.debug(f"Seed: {SEED}")
 
@@ -242,9 +261,7 @@ def main():
 
     threshold = 0.7
 
-    # dev_path = Path()/"data"/"adult_income"/"small"
-    dev_path = Path()/"data"/"adult_income"
-    output_path = Path()/"data"/"output"
+
 
     # manually set known value for input size of the model --> dataset specific
     model = DEV_ONLY_create_target_model(104)
