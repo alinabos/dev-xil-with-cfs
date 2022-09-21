@@ -247,7 +247,8 @@ def main():
 
     logfile = output_path / "logfile"
     # clear logfile
-    open(logfile, "w").close()
+    if logfile.is_file():
+        open(file=logfile, mode="w").close()
     
     log.basicConfig(filename=logfile,
                     filemode="a",
