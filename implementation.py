@@ -12,7 +12,7 @@ from src.helper_models import init_helper_models
 SEED = 42
 
 
-def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, threshold, automate=False):
+def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, threshold, automate=False, output_path=Path()):
 
     # validate user input
     if datafiles_with_header is False:
@@ -22,6 +22,8 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
 
     DATA_PATH = Path() / data_path
     log.debug(f"Looking in {DATA_PATH} for data files (assuming \".data\" and \".test\" as file endings)")
+
+    OUTPUT_PATH = Path() / output_path
 
     # read dataset from data_path (assuming ".data" and ".test" as file endings)
     data_files = sorted([str(file.name) for file in Path(DATA_PATH).glob("*.data")], key=str.lower)
@@ -88,7 +90,8 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
         log.debug("Fitting target model")
         model.fit(X_train, y_train)
         score = model.score(X_test, y_test)
-        with open("model_performance", "a", encoding="utf-8") as file:
+        mp_f = OUTPUT_PATH / "model_performance"
+        with open(file=mp_f, mode="a", encoding="utf-8") as file:
             file.write(f"##### Epoch {epoch} #####\n")
             file.write(f"mean accuracy of model: {score}")
 
@@ -202,8 +205,8 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
 
                 corrected_cfs.append(cf_for_training)
 
-
-    with open("counterfactuals.csv", "w", encoding="utf-8") as file:
+    cf_f = OUTPUT_PATH / "counterfactuals"
+    with open(file=cf_f, mode="w", encoding="utf-8") as file:
         for cf in corrected_cfs:
             file.write(cf + "/n")
 
@@ -241,6 +244,7 @@ def main():
 
     # dev_path = Path()/"data"/"adult_income"/"small"
     dev_path = Path()/"data"/"adult_income"
+    output_path = Path()/"data"/"output"
 
     # manually set known value for input size of the model --> dataset specific
     model = DEV_ONLY_create_target_model(104)
@@ -248,7 +252,7 @@ def main():
     ########## DEV only ##########
     
     # train_model_with_cfs(data_path=dev_path, datafiles_with_header=True, model=model, epochs=5, threshold=threshold)
-    train_model_with_cfs(data_path=dev_path, datafiles_with_header=True, model=model, epochs=5, threshold=threshold, automate=True)
+    train_model_with_cfs(data_path=dev_path, datafiles_with_header=True, model=model, epochs=5, threshold=threshold, automate=True, output_path=output_path)
 
     log.info("End program")
 
