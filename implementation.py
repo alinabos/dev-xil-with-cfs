@@ -244,6 +244,7 @@ def main():
     # dev_path = Path()/"data"/"adult_income"/"small"
     dev_path = Path()/"data"/"adult_income"
     output_path = Path()/"data"/"output"
+    output_path.mkdir(parents=True, exist_ok=True)
 
     logfile = output_path / "logfile"
     # clear logfile
