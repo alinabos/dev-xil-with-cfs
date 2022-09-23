@@ -28,7 +28,6 @@ class TabularDatasetProcessor():
         self.label_encoder = LabelEncoder()
 
 
-
         # drop NaN values to ensure encoders are fitted correctly
         raw_data_tmp = self.drop_nan(raw_data)
         
@@ -67,14 +66,14 @@ class TabularDatasetProcessor():
         log.debug(f"{old_row_count - new_row_count} of {old_row_count} rows were dropped. New count: {new_row_count}")
             
         log.debug(f"Transform the following categorical variables with one-hot encoding: {self.categorical_features}")
-        data = self.encode_features(raw_data)
+        data = self.transform_features_and_target(raw_data)
         log.debug(f"Encoded target variable. Number of classes found: {len(self.label_encoder.classes_)}. Mapping of classes: {dict(zip(self.label_encoder.classes_, self.label_encoder.transform(self.label_encoder.classes_)))}")
         
         log.info(f"Finished preprocessing: Shape of the dataset after the preprocessing (including target): {data.shape}")
 
         return data
 
-    def encode_features(self, raw_data):
+    def transform_features_and_target(self, raw_data):
         # encode categorical data and target column in One Hot Encoding
         cat_data = self.ohc_encoder.transform(raw_data[self.categorical_features])
         
@@ -106,5 +105,17 @@ class TabularDatasetProcessor():
         inv_data = pd.concat([data[self.numerical_features], inv_feature_df, inv_target_df], axis=1)
         # reindex DataFrame to restore initial column order
         inv_data = inv_data.reindex(columns=self.initial_features)
+
+        return inv_data
+
+    def inverse_transform_data(self, data: pd.DataFrame):
+        # inverse_transform feature data
+        inv_feature_data = self.ohc_encoder.inverse_transform(data[self.ohc_encoder.get_feature_names_out(self.categorical_features)])
+        inv_feature_df = pd.DataFrame(data=inv_feature_data, columns=self.categorical_features)
+
+        # put different DataFrames together: numerical data, categorical features, target column
+        inv_data = pd.concat([data[self.numerical_features], inv_feature_df], axis=1)
+        # reindex DataFrame to restore initial column order
+        inv_data = inv_data.reindex(columns=self.initial_features[:-1])
 
         return inv_data
