@@ -27,7 +27,6 @@ class TabularDatasetProcessor():
         self.ohc_encoder = OneHotEncoder(categories="auto", sparse=False)
         self.label_encoder = LabelEncoder()
 
-
         # drop NaN values to ensure encoders are fitted correctly
         raw_data_tmp = self.drop_nan(raw_data)
         
@@ -39,7 +38,8 @@ class TabularDatasetProcessor():
         self.data = self.preprocess_data(raw_data)
         self.preprocessed_feature_count = len(self.data.columns)
 
-    def drop_nan(self, data):
+
+    def drop_nan(self, data: pd.DataFrame) -> pd.DataFrame:
         data_tmp = data.dropna(axis=0, how="any")
         data_tmp.reset_index(drop=True, inplace=True)
         return data_tmp
@@ -56,7 +56,7 @@ class TabularDatasetProcessor():
         """
         
         log.debug("Start preprocessing")
-        log.info(f"Shape of the dataset before preprocessing: {raw_data.shape}")
+        log.debug(f"Shape of the dataset before preprocessing: {raw_data.shape}")
 
         # drop NaN values
         log.debug("Dropping NaN values")
@@ -69,11 +69,15 @@ class TabularDatasetProcessor():
         data = self.transform_features_and_target(raw_data)
         log.debug(f"Encoded target variable. Number of classes found: {len(self.label_encoder.classes_)}. Mapping of classes: {dict(zip(self.label_encoder.classes_, self.label_encoder.transform(self.label_encoder.classes_)))}")
         
-        log.info(f"Finished preprocessing: Shape of the dataset after the preprocessing (including target): {data.shape}")
-
+        log.debug(f"Finished preprocessing: Shape of the dataset after the preprocessing (including target): {data.shape}")
+        
         return data
 
-    def transform_features_and_target(self, raw_data):
+
+    def transform_features_and_target(self, raw_data: pd.DataFrame) -> pd.DataFrame:
+        # reset index of data to ensure concatenation results in the same rows
+        raw_data = raw_data.reset_index(drop=True)
+        
         # encode categorical data and target column in One Hot Encoding
         cat_data = self.ohc_encoder.transform(raw_data[self.categorical_features])
         
@@ -92,7 +96,10 @@ class TabularDatasetProcessor():
         return data
     
 
-    def inverse_transform_data_and_target(self, data: pd.DataFrame):
+    def inverse_transform_data_and_target(self, data: pd.DataFrame) -> pd.DataFrame:
+        # reset index of data to ensure concatenation results in one row
+        data = data.reset_index(drop=True)
+
         # inverse_transform feature data
         inv_feature_data = self.ohc_encoder.inverse_transform(data[self.ohc_encoder.get_feature_names_out(self.categorical_features)])
         inv_feature_df = pd.DataFrame(data=inv_feature_data, columns=self.categorical_features)
@@ -105,10 +112,13 @@ class TabularDatasetProcessor():
         inv_data = pd.concat([data[self.numerical_features], inv_feature_df, inv_target_df], axis=1)
         # reindex DataFrame to restore initial column order
         inv_data = inv_data.reindex(columns=self.initial_features)
-
         return inv_data
 
-    def inverse_transform_data(self, data: pd.DataFrame):
+
+    def inverse_transform_data(self, data: pd.DataFrame) -> pd.DataFrame:
+        # reset index of data to ensure concatenation results in one row
+        data = data.reset_index(drop=True)
+        
         # inverse_transform feature data
         inv_feature_data = self.ohc_encoder.inverse_transform(data[self.ohc_encoder.get_feature_names_out(self.categorical_features)])
         inv_feature_df = pd.DataFrame(data=inv_feature_data, columns=self.categorical_features)
@@ -117,5 +127,4 @@ class TabularDatasetProcessor():
         inv_data = pd.concat([data[self.numerical_features], inv_feature_df], axis=1)
         # reindex DataFrame to restore initial column order
         inv_data = inv_data.reindex(columns=self.initial_features[:-1])
-
         return inv_data

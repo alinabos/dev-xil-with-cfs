@@ -1,5 +1,5 @@
-from xmlrpc.client import Boolean
 import dice_ml
+from dice_ml.utils.exception import UserConfigValidationException
 import inquirer
 import logging as log
 import numpy as np
@@ -11,19 +11,46 @@ from src.helper_models import init_helper_models
 
 SEED = 42
 
+MODE_AUTOMATE_GEN = "automate_gen"      # automate + generate counterfactuals that user should correct
+MODE_AUTOMATE_TRAIN = "automate_train"  # automate + read corrected counterfactuals from file
+MODE_INTERACTIVE = "interactive"        # interactive (counterfactuals are corrected live while training)
 
-def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, threshold, automate=False, output_path=Path()):
+
+def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, threshold_hm_acc, mode=MODE_INTERACTIVE, output_path=Path()):
 
     # validate user input
+    # if datafiles contain no header, give user the option to exit program
     if datafiles_with_header is False:
-        log.warning("Providing a header in your data files is vital in order for the human expert to validate the counterfactual examples in an appropriate time. Try to provide a header in your files.")
+        log.critical("Providing a header in your data files is vital in order for the human expert to validate the counterfactual examples in an appropriate time. Please provide a header in your files.")
+        log.critical("Exit program")
+        exit()
 
     log.info(f"Number of rounds: {epochs}")
 
+    # data paths
     DATA_PATH = Path() / data_path
-    log.debug(f"Looking in {DATA_PATH} for data files (assuming \".data\" and \".test\" as file endings)")
+    if not DATA_PATH.exists() or not DATA_PATH.is_dir():
+        log.critical(f"{data_path} was provided as data path (full path: {DATA_PATH}). Path is not valid. Please check your input. The program will exit now.")
+        log.critical("Exit program")
+        exit()
+    log.debug(f"Set data path: {DATA_PATH}. Look here for data files (assuming \".data\" and \".test\" as file endings)")
 
+    # path to file containing corrected counterfactuals
+    CORRECTED_CF_FILE = DATA_PATH / "corrected_counterfactuals.csv"
+
+    if mode == MODE_AUTOMATE_TRAIN:
+        if not CORRECTED_CF_FILE.exists() or not CORRECTED_CF_FILE.is_file():
+            log.critical(f"Corrected counterfactuals are expected to be in {CORRECTED_CF_FILE} but this is not valid. Please make sure that the counterfactuals are in a file named \"corrected_counterfactuals.csv\" in the data path you provide. The program will exit now.")
+            log.critical("Exit program")
+            exit()
+        else:
+            log.debug("Found \"corrected_counterfactuals.csv\".")
+
+    # output paths
     OUTPUT_PATH = Path() / output_path
+    CF_OUTPUT_PATH = OUTPUT_PATH / "counterfactuals"
+    CRITIAL_INSTANCES_OUTPUT_PATH = OUTPUT_PATH / "instances_without_counterfactual"
+
     model_logfile = OUTPUT_PATH / "model_performance"
     if model_logfile.is_file():
         open(file=model_logfile, mode="w", encoding="utf-8").close()
@@ -37,17 +64,26 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
     test_file = test_files[0]
     log.debug(f"Found the following \".test\" files: {test_files}")
 
-    header = None
-    if datafiles_with_header is True:
-        header = 0
-    log.info(f"Read training data from {DATA_PATH / data_file}")
+    # treat first line of files as header and read data from files
+    header = 0
+    log.debug(f"Read training data from {DATA_PATH / data_file}")
     raw_training_data = pd.read_csv(DATA_PATH / data_file, header=header, skipinitialspace=True)
 
-    log.info(f"Read test data from {DATA_PATH / test_file}")
+    log.debug(f"Read test data from {DATA_PATH / test_file}")
     raw_test_data = pd.read_csv(DATA_PATH / test_file, header=header, skipinitialspace=True)
 
     # preprocess data
     data_processor = TabularDatasetProcessor(raw_training_data)
+
+    # read corrected counterfactuals from file
+    corrected_cfs_from_file = None
+    if mode == MODE_AUTOMATE_TRAIN:
+        if CORRECTED_CF_FILE.stat().st_size == 0:
+            log.critical(f"{CORRECTED_CF_FILE} is empty. Please proved counterfactuals or start program in a different mode. The program will exit now.")
+            log.critical("Exit program")
+            exit()
+        corrected_cfs_from_file = read_corrected_cfs_from_file(path=CORRECTED_CF_FILE, data_header=data_processor.initial_features)
+
     # get encoded training and test data
     training_data_enc = data_processor.data
     test_data_enc = data_processor.preprocess_data(raw_test_data)
@@ -60,65 +96,45 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
         log.warning(f"Number of features in the test set ({test_data_enc.shape[1]}) differs from the training set ({training_data_enc.shape[1]}). Adopt training features and fill new columns with 0.")
         test_data_enc = test_data_enc.reindex(columns=training_data_enc.columns, fill_value=0)
 
-    # get training and test data with their original categorical columns and values
-    training_data = data_processor.inverse_transform_data_and_target(training_data_enc)
-    test_data = data_processor.inverse_transform_data_and_target(test_data_enc)
-
-    # Get dataset shapes once prior to the training to initialize helper models
-    # n_samples_org = training_data.shape[0] 
+    # required for the initilization of the helper models
     n_features = data_processor.preprocessed_feature_count
+
+    # split test data into x and y arrays
+    log.debug("Split training and test data into x and y arrays")
+
+    X_train, y_train = split_data_in_xy(training_data_enc)
+    X_test, y_test = split_data_in_xy(test_data_enc)
+
+    log.debug(f"Training data {training_data_enc.shape} split into X {X_train.shape} and y {y_train.shape}.")
+    log.debug(f"Test data {test_data_enc.shape} split into X {X_test.shape} and y {y_test.shape}.")
+    
+    log.info("Start general training process")
+
+    train_and_log_target_model(model, model_logfile, X_train, y_train, X_test, y_test)
+
+    # initialize helper models with standard parameters
+    helper_models = init_helper_models(n_features=n_features, seed=SEED)
+
+    helper_accuracies = []  # dim: 1 x number_helper_models
+    log.debug("Start training of the helper models")
+
+    # train helper models once with original data
+    for hm in helper_models:
+        hm.fit(X_train, y_train)
+        accuracy = hm.score(X_test, y_test)
+        helper_accuracies.append(accuracy)
+
+    log.debug(f"Finished training of the helper models: {helper_accuracies}")
 
     # contains corrected cfs with features NOT encoded (still in categorical format)
     corrected_cfs = []
     cf_count = 0
 
-    log.info("Start training process for target model")
-
     # epochs
     for epoch in range(epochs):
-        log.info(f"Start round {epoch+1}")
+        log.info(f"Start round {epoch+1} of {epochs}.")
 
-        # add counterfactuals to dataset if new CFs were added
-        if len(corrected_cfs) > cf_count:
-            log.debug("Add approved counterfactuals to training set")
-            training_data_enc = pd.concat([training_data_enc, data_processor.encode_features(corrected_cfs)], ignore_index=True, axis=0)
-            cf_count = len(corrected_cfs)
-
-        # split training and test data into x and y arrays
-        log.debug("Split training and test data into x and y arrays")
-        X_train = training_data_enc[training_data_enc.columns[0:-1]]
-        y_train = training_data_enc[training_data_enc.columns[-1]]
-        X_test = test_data_enc[test_data_enc.columns[0:-1]]
-        y_test = test_data_enc[test_data_enc.columns[-1]]
-
-        log.debug(f"Training data {training_data_enc.shape} split into X {X_train.shape} and y {y_train.shape}.")
-        log.debug(f"Test data {test_data_enc.shape} split into X {X_test.shape} and y {y_test.shape}.")
-
-        # train target model
-        log.debug("Fitting target model")
-        model.fit(X_train, y_train)
-        score = model.score(X_test, y_test)
-
-        # write target model performance to file        
-        with open(file=model_logfile, mode="a", encoding="utf-8") as file:
-            file.write(f"##### Epoch {epoch} #####\n")
-            file.write(f"mean accuracy of model: {score}\n")
-
-        # initialize helper models with standard parameters
-        helper_models = init_helper_models(n_features=n_features, seed=SEED)
-
-        # train helper models with all training and test instances except the current one
-        helper_accuracies = []  # dim: 1 x number_helper_models
-        log.debug("Start training of the helper models")
-
-        for hm in helper_models:
-            hm.fit(X_train, y_train)
-            accuracy = hm.score(X_test, y_test)
-            helper_accuracies.append(accuracy)
-
-        log.debug(f"Finished training of the helper models: {helper_accuracies}")
-
-        # set up explainer
+        # set up explainer (updated every epoch because model changes, too)
         dice_data = dice_ml.Data(dataframe=training_data_enc, continuous_features=data_processor.numerical_features, outcome_name=data_processor.target_name)
         dice_model = dice_ml.Model(model=model, backend="sklearn")
         explainer = dice_ml.Dice(dice_data, dice_model, method="random")
@@ -126,26 +142,50 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
         # generate counterfactuals and save in counterfactuals list
         for index in range(X_train.shape[0]):
             log.debug(f"Current instance index: {index} (training sample {index +1}).")
+            if index == 100:
+                break
 
-            # generate current instance (only X_data, no y/label)
+            # get current instance (only X_data, no y/label)
             current_instance_enc = X_train.iloc[[index]]
 
-            # produce counterfactual (input has to be without the target/label)
-            generated_cfs = explainer.generate_counterfactuals(current_instance_enc, total_CFs=3, desired_class="opposite", random_seed=SEED)
-            generated_cfs.visualize_as_list()
-            counterfactual = None 
+            log.debug("Generate counterfactuals for current instance")
 
-            # validate counterfactuals
-            for cf_index in range(len(generated_cfs.cf_examples_list)):
-                counterfactual = generated_cfs.cf_examples_list[cf_index].final_cfs_df
+            try:
+                # produce counterfactual for current instance (input has to be without the target/label)
+                generated_cfs_enc = explainer.generate_counterfactuals(current_instance_enc, total_CFs=3, desired_class="opposite", random_seed=SEED)
+
+            except UserConfigValidationException as e:
+                log.warning(f"{type(e)}: No counterfactuals found for the current instance. Write instance to file {CRITIAL_INSTANCES_OUTPUT_PATH} and continue with next training instance")
+                Xy_instance = pd.concat([current_instance_enc, y_train.iloc[[index]]], axis=1)
+                
+                # create file
+                if not CRITIAL_INSTANCES_OUTPUT_PATH.exists():
+                    CRITIAL_INSTANCES_OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
+
+                # if file was empty, print dataframe header; otherwise just the data
+                if CRITIAL_INSTANCES_OUTPUT_PATH.stat().st_size == 0:
+                    Xy_instance.to_csv(path=CRITIAL_INSTANCES_OUTPUT_PATH, mode="a", header=True, index=False, encoding="utf-8")
+                else:
+                    Xy_instance.to_csv(path=CRITIAL_INSTANCES_OUTPUT_PATH, mode="a", header=False, index=False, encoding="utf-8")
+                continue
+
+            generated_cfs_enc.visualize_as_list()
+            counterfactual_enc = None 
+
+            # validate counterfactuals and use the first valid one
+            for cf_index in range(len(generated_cfs_enc.cf_examples_list[0].final_cfs_df)):
                 try:
-                    counterfactual_enc = data_processor.transform_features_and_target(counterfactual)
+                    cf_to_test = generated_cfs_enc.cf_examples_list[0].final_cfs_df.iloc[[cf_index]]
+                    # test if inverse_transform produces a valid data instance
+                    data_processor.inverse_transform_data_and_target(cf_to_test)
+                    log.debug("Found valid counterfactual")
+                    counterfactual_enc = cf_to_test
                     break
                 except ValueError:
-                    log.critical(f"Counterfactual at index {cf_index} was not valid. Next counterfactual in the list is tested.")
+                    log.debug(f"Counterfactual at index {cf_index} was not valid. Next counterfactual in the list is tested.")
             
             # if no valid counterfactual was found, skip to next training instance
-            if counterfactual == None:
+            if counterfactual_enc.empty == True:
                 log.critical("No valid counterfactual found. Continue with next training sample.")
                 continue
 
@@ -156,30 +196,33 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
             for hm in helper_models:
                 pred = hm.predict(counterfactual_enc.iloc[:,:-1])   # remove target column for prediction
                 helper_preds.append(pred[0])
-                proba_pred = hm.predict_proba(counterfactual.iloc[:,:-1])
+                proba_pred = hm.predict_proba(counterfactual_enc.iloc[:,:-1])
                 helper_proba_preds.append(proba_pred[0])
 
-            log.debug(f"Sum of helper model accuracies: {np.sum(helper_accuracies)}.")
-            log.debug(f"Helper model predictions for current instance: {helper_preds}")
-            log.debug(f"Helper model probabilities for current instance: {helper_proba_preds}")
+            log.debug(f"Helper model predictions for counterfactual: {helper_preds}")
+            log.debug(f"Helper model probabilities for counterfactual: {helper_proba_preds}")
 
             # calculate uncertainty of helper_models
             weighted_bagging_score = np.dot(helper_accuracies, helper_preds)/np.sum(helper_accuracies)    # scalar value between 0 and highest class number/encoding
-            weighted_bagging_pred = round(weighted_bagging_score)
             weighted_probabs = np.dot(helper_accuracies, helper_proba_preds)/np.sum(helper_accuracies)    # dim: 1 x number_classes; values between 0 and highest class number/encoding
             weighted_probabs_pred = np.argmax(weighted_probabs)
+            
             log.debug(f"weighted_bagging_score: {weighted_bagging_score}")
-            log.debug(f"weighted_bagging_pred: {weighted_bagging_pred}")
-            log.debug(f"Weighted probabilities: {weighted_probabs}")
+            log.debug(f"Weighted_probabs_pred: {weighted_probabs_pred}. Weighted probabilities: {weighted_probabs}")
             
             # if helper model probability is below the given threshold, present counterfactual to human expert
-            if weighted_probabs[weighted_probabs_pred] < threshold:
+            if weighted_probabs[weighted_probabs_pred] < threshold_hm_acc:
+
                 # present counterfactual to human expert for correction and retrieve corrected version
+                counterfactual = data_processor.inverse_transform_data_and_target(counterfactual_enc)
                 log.info(f"Found a CF for review!\n{counterfactual.T}")
-                
+
+                # get corrected counterfactual depending on selected mode
+                # MODE_AUTOMATE_GEN (standard)
                 cf_for_training = counterfactual
 
-                if automate == False:
+                # MODE_INTERACTIVE: generate user prompts
+                if mode == MODE_INTERACTIVE:
                     # check with user if counterfactual needs to be corrected at all
                     question = [
                         inquirer.Confirm(name="needs_editing", 
@@ -214,22 +257,78 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
                                                 message=f"Choose value of {target}. Old value: {counterfactual.iloc[0][target]}",
                                                 choices=data_processor.label_encoder.classes_.tolist())
                         question_cf.append(target_prompt)
-                            
+                        
+                        # prompt user for input and save answer in dataframe
                         answer_cf = inquirer.prompt(question_cf)
-                    
                         cf_for_training = pd.DataFrame([answer_cf])
 
+                # MODE_AUTOMATE_TRAIN: get corrected counterfactual from file
+                elif mode == MODE_AUTOMATE_TRAIN:
+                    corrected_cfs_from_file.reset_index(drop=True)
+                    cf_for_training = corrected_cfs_from_file.iloc[[0]]
+                    corrected_cfs_from_file.drop(0, axis=0, inplace=True)
+
+                # append corrected counterfactual to counterfactual list
                 corrected_cfs.append(cf_for_training)
 
-    cf_f = OUTPUT_PATH / "counterfactuals"
-    with open(file=cf_f, mode="w", encoding="utf-8") as file:
-        for feature in data_processor.initial_features:
-            file.write(feature + ",")
-        file.write("\n")
-        for generated_cfs in corrected_cfs:
-            file.write(generated_cfs + "\n")
+        # add new counterfactuals to dataset if new CFs were created
+        if len(corrected_cfs) > cf_count:
+            log.debug("Add approved new counterfactuals to training set")
+
+            # build one dataframe from list of one-row dataframes and apply encoding
+            new_cfs_df = pd.concat(corrected_cfs[cf_count:], axis=0, ignore_index=True)
+            new_cfs_df_enc = data_processor.transform_features_and_target(new_cfs_df)
+
+            # split counterfactual data in X and y data
+            cfs_X_data, cfs_y_data = split_data_in_xy(new_cfs_df_enc)
+
+            # append counterfactual data to training set
+            X_train = pd.concat([X_train, cfs_X_data], ignore_index=True, axis=0)
+            y_train = pd.concat([y_train, cfs_y_data], ignore_index=True, axis=0)
+
+            cf_diff = len(new_cfs_df.index)
+            log.info(f"{cf_diff} new counterfactuals were added to the training set.")
+
+            cf_count = len(corrected_cfs)
+
+        # train model with new dataset
+        train_and_log_target_model(model, model_logfile, X_train, y_train, X_test, y_test, epoch+1)
+    
+    # write all (corrected) counterfactuals used for training to a file
+    cfs_df = pd.concat(corrected_cfs, axis=0, ignore_index=True)
+    cfs_df.to_csv(CF_OUTPUT_PATH, mode="w", header=True, index=False, encoding="utf-8")
 
     log.info("Finished training the target model")
+
+def read_corrected_cfs_from_file(path: Path, data_header: list) -> pd.DataFrame:
+    raw_data = pd.read_csv(path, header=0, skipinitialspace=True)
+    if not raw_data.columns == data_header:
+        log.critical(f"Header of {path} does not match dataset header. Please adapt the files. The program will exit now.")
+        exit()
+    return raw_data
+
+
+def split_data_in_xy(dataset: pd.DataFrame):
+    X_data = dataset[dataset.columns[0:-1]]
+    y_data = dataset[dataset.columns[-1]]
+    return X_data,y_data
+
+
+def train_and_log_target_model(model, model_logfile: Path, X_train: pd.DataFrame, 
+                        y_train: pd.Series, X_test: pd.DataFrame, y_test: pd.Series, epoch=0):
+    # train target model
+    log.debug("Fitting target model")
+    model.fit(X_train, y_train)
+    score = model.score(X_test, y_test)
+
+    # write target model performance to file        
+    with open(file=model_logfile, mode="a", encoding="utf-8") as file:
+        if epoch == 0:
+            file.write("##### Initial fit #####\n")
+            file.write(str(model))
+        else:
+            file.write(f"\n\n##### Epoch {epoch} #####\n")
+        file.write(f"mean accuracy of model: {score}")
 
 
 def DEV_ONLY_create_target_model(feature_count):
@@ -237,10 +336,10 @@ def DEV_ONLY_create_target_model(feature_count):
     hidden_layer2_size = round(hidden_layer1_size/3)
     model = MLPClassifier(hidden_layer_sizes=(hidden_layer1_size, hidden_layer2_size),
                           activation="relu", solver="adam", random_state=SEED)
-    log.debug(f"target model: {model}")
     return model
 
-def validate_number(_, current) -> Boolean:
+
+def validate_number(_, current) -> bool:
     current = float(current)
     return isinstance(current, float)
 
@@ -273,7 +372,7 @@ def main():
 
     ########## DEV only ##########
 
-    threshold = 0.7
+    threshold = 0.60
 
 
 
@@ -281,9 +380,11 @@ def main():
     model = DEV_ONLY_create_target_model(104)
 
     ########## DEV only ##########
-    
+
+
     # train_model_with_cfs(data_path=dev_path, datafiles_with_header=True, model=model, epochs=5, threshold=threshold)
-    train_model_with_cfs(data_path=dev_path, datafiles_with_header=True, model=model, epochs=5, threshold=threshold, automate=True, output_path=output_path)
+    train_model_with_cfs(data_path=dev_path, datafiles_with_header=True, model=model, epochs=5, 
+                threshold_hm_acc=threshold, mode=MODE_AUTOMATE_GEN, output_path=output_path, )
 
     log.info("End program")
 
