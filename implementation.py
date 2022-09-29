@@ -399,7 +399,7 @@ def main():
 
     ########## DEV only ##########
 
-    threshold = 0.70
+    threshold = 0.60
 
     # manually set known value for input size of the model --> dataset specific
     model = DEV_ONLY_create_target_model(104)
