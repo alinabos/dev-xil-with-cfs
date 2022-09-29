@@ -1,6 +1,7 @@
 import dice_ml
 from dice_ml.utils.exception import UserConfigValidationException
 import inquirer
+from joblib import dump
 import logging as log
 import numpy as np
 import pandas as pd
@@ -9,14 +10,14 @@ from sklearn.neural_network import MLPClassifier
 from src.TabularDatasetProcessor import TabularDatasetProcessor
 from src.helper_models import init_helper_models
 
-SEED = 42
-
 MODE_AUTOMATE_GEN = "automate_gen"      # automate + generate counterfactuals that user should correct
 MODE_AUTOMATE_TRAIN = "automate_train"  # automate + read corrected counterfactuals from file
 MODE_INTERACTIVE = "interactive"        # interactive (counterfactuals are corrected live while training)
 
+mode = MODE_AUTOMATE_GEN
+SEED = 42
 
-def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, threshold_hm_acc, mode=MODE_INTERACTIVE, output_path=Path()):
+def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, epochs: int, threshold_hm_acc: float, output_path=Path()):
 
     # validate user input
     # if datafiles contain no header, give user the option to exit program
@@ -28,12 +29,12 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
     log.info(f"Number of rounds: {epochs}")
 
     # data paths
-    DATA_PATH = Path() / data_path
+    DATA_PATH = Path(data_path)
     if not DATA_PATH.exists() or not DATA_PATH.is_dir():
-        log.critical(f"{data_path} was provided as data path (full path: {DATA_PATH}). Path is not valid. Please check your input. The program will exit now.")
+        log.critical(f"{DATA_PATH} was provided as data path. Path is not valid. Please check your input. The program will exit now.")
         log.critical("Exit program")
         exit()
-    log.debug(f"Set data path: {DATA_PATH}. Look here for data files (assuming \".data\" and \".test\" as file endings)")
+    log.debug(f"Set data path: {DATA_PATH}.")
 
     # path to file containing corrected counterfactuals
     CORRECTED_CF_FILE = DATA_PATH / "corrected_counterfactuals.csv"
@@ -46,14 +47,29 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
         else:
             log.debug("Found \"corrected_counterfactuals.csv\".")
 
-    # output paths
-    OUTPUT_PATH = Path() / output_path
-    CF_OUTPUT_PATH = OUTPUT_PATH / "counterfactuals"
-    CRITIAL_INSTANCES_OUTPUT_PATH = OUTPUT_PATH / "instances_without_counterfactual"
+    # general output paths + creation
+    OUTPUT_PATH = Path(output_path)
+    if not OUTPUT_PATH.exists() or not OUTPUT_PATH.is_dir():
+        log.critical(f"{OUTPUT_PATH} was provided as output path. Path is not valid. Please check your input. The program will exit now.")
+        log.critical("Exit program")
+        exit()
+    log.debug(f"Set output path: {OUTPUT_PATH}.")
 
-    model_logfile = OUTPUT_PATH / "model_performance"
-    if model_logfile.is_file():
-        open(file=model_logfile, mode="w", encoding="utf-8").close()
+    MODEL_OUTPUT_PATH = output_path / "models"
+    if not MODEL_OUTPUT_PATH.exists():
+        MODEL_OUTPUT_PATH.mkdir(parents=True)
+    
+    # output files paths
+    cf_file = OUTPUT_PATH / "counterfactuals.csv"
+    no_cf_instances_file = OUTPUT_PATH / "instances_without_counterfactual.csv"
+    model_logfile = OUTPUT_PATH / "model_performance.txt"
+
+    file_list = [cf_file, no_cf_instances_file, model_logfile]
+
+    # clear file content
+    for file in file_list:
+        if file.is_file():
+            open(file=file, mode="w", encoding="utf-8").close()
 
     # read dataset from data_path (assuming ".data" and ".test" as file endings)
     data_files = sorted([str(file.name) for file in Path(DATA_PATH).glob("*.data")], key=str.lower)
@@ -110,25 +126,27 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
     
     log.info("Start general training process")
 
-    train_and_log_target_model(model, model_logfile, X_train, y_train, X_test, y_test)
-
     # initialize helper models with standard parameters
     helper_models = init_helper_models(n_features=n_features, seed=SEED)
 
     helper_accuracies = []  # dim: 1 x number_helper_models
     log.debug("Start training of the helper models")
 
-    # train helper models once with original data
+    # train helper models once with original data and save to file
     for hm in helper_models:
         hm.fit(X_train, y_train)
         accuracy = hm.score(X_test, y_test)
         helper_accuracies.append(accuracy)
+        hm_path = MODEL_OUTPUT_PATH / f"{type(hm).__name__}"
+        dump(hm, hm_path)
 
     log.debug(f"Finished training of the helper models: {helper_accuracies}")
 
     # contains corrected cfs with features NOT encoded (still in categorical format)
     corrected_cfs = []
     cf_count = 0
+    
+    train_and_log_target_model(model, model_logfile, MODEL_OUTPUT_PATH, X_train, y_train, X_test, y_test, len(corrected_cfs))
 
     # epochs
     for epoch in range(epochs):
@@ -142,8 +160,8 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
         # generate counterfactuals and save in counterfactuals list
         for index in range(X_train.shape[0]):
             log.debug(f"Current instance index: {index} (training sample {index +1}).")
-            if index == 100:
-                break
+            # if index == 100:
+            #     break
 
             # get current instance (only X_data, no y/label)
             current_instance_enc = X_train.iloc[[index]]
@@ -155,18 +173,16 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
                 generated_cfs_enc = explainer.generate_counterfactuals(current_instance_enc, total_CFs=3, desired_class="opposite", random_seed=SEED)
 
             except UserConfigValidationException as e:
-                log.warning(f"{type(e)}: No counterfactuals found for the current instance. Write instance to file {CRITIAL_INSTANCES_OUTPUT_PATH} and continue with next training instance")
+                log.warning(f"{type(e)}: No counterfactuals found for the current instance. Write instance to file {no_cf_instances_file} and continue with next training instance")
                 Xy_instance = pd.concat([current_instance_enc, y_train.iloc[[index]]], axis=1)
-                
-                # create file
-                if not CRITIAL_INSTANCES_OUTPUT_PATH.exists():
-                    CRITIAL_INSTANCES_OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
 
-                # if file was empty, print dataframe header; otherwise just the data
-                if CRITIAL_INSTANCES_OUTPUT_PATH.stat().st_size == 0:
-                    Xy_instance.to_csv(path=CRITIAL_INSTANCES_OUTPUT_PATH, mode="a", header=True, index=False, encoding="utf-8")
+                # if file didn't exist or was empty, print dataframe header; otherwise just the data
+                if not no_cf_instances_file.exists():
+                    Xy_instance.to_csv(path_or_buf=no_cf_instances_file, mode="a", header=True, index=False, encoding="utf-8")
+                elif no_cf_instances_file.stat().st_size == 0:
+                    Xy_instance.to_csv(path_or_buf=no_cf_instances_file, mode="a", header=True, index=False, encoding="utf-8")
                 else:
-                    Xy_instance.to_csv(path=CRITIAL_INSTANCES_OUTPUT_PATH, mode="a", header=False, index=False, encoding="utf-8")
+                    Xy_instance.to_csv(path_or_buf=no_cf_instances_file, mode="a", header=False, index=False, encoding="utf-8")
                 continue
 
             generated_cfs_enc.visualize_as_list()
@@ -292,11 +308,11 @@ def train_model_with_cfs(data_path, datafiles_with_header, model, epochs, thresh
             cf_count = len(corrected_cfs)
 
         # train model with new dataset
-        train_and_log_target_model(model, model_logfile, X_train, y_train, X_test, y_test, epoch+1)
+        train_and_log_target_model(model, model_logfile, MODEL_OUTPUT_PATH ,X_train, y_train, X_test, y_test, epoch+1, cf_count)
     
     # write all (corrected) counterfactuals used for training to a file
     cfs_df = pd.concat(corrected_cfs, axis=0, ignore_index=True)
-    cfs_df.to_csv(CF_OUTPUT_PATH, mode="w", header=True, index=False, encoding="utf-8")
+    cfs_df.to_csv(path_or_buf=cf_file, mode="w", header=True, index=False, encoding="utf-8")
 
     log.info("Finished training the target model")
 
@@ -314,8 +330,8 @@ def split_data_in_xy(dataset: pd.DataFrame):
     return X_data,y_data
 
 
-def train_and_log_target_model(model, model_logfile: Path, X_train: pd.DataFrame, 
-                        y_train: pd.Series, X_test: pd.DataFrame, y_test: pd.Series, epoch=0):
+def train_and_log_target_model(model, model_logfile: Path, model_output: Path(), X_train: pd.DataFrame, 
+                y_train: pd.Series, X_test: pd.DataFrame, y_test: pd.Series, cf_count: int, epoch=0):
     # train target model
     log.debug("Fitting target model")
     model.fit(X_train, y_train)
@@ -327,8 +343,19 @@ def train_and_log_target_model(model, model_logfile: Path, X_train: pd.DataFrame
             file.write("##### Initial fit #####\n")
             file.write(str(model))
         else:
-            file.write(f"\n\n##### Epoch {epoch} #####\n")
-        file.write(f"mean accuracy of model: {score}")
+            file.write(f"\n\n##### Epoch {epoch} #####")
+
+        file.write(f"\nmean accuracy of model: {score}")
+
+        if mode == MODE_AUTOMATE_GEN:
+            file.write(f"\nCurrent number of counterfactual to correct (and used for training): {cf_count}")
+        else:
+            file.write(f"\nCurrent number of counterfactual used for training: {cf_count}")
+
+    # save model to disk
+    out_filename = model_output / f"model{epoch}.joblib"
+    dump(model, out_filename)
+
 
 
 def DEV_ONLY_create_target_model(feature_count):
@@ -354,7 +381,7 @@ def main():
 
     # dev_path = Path()/"data"/"adult_income"/"small"
     dev_path = Path()/"data"/"adult_income"
-    output_path = Path()/"data"/"output"
+    output_path = Path()/"output"
     output_path.mkdir(parents=True, exist_ok=True)
 
     logfile = output_path / "logfile"
@@ -372,9 +399,7 @@ def main():
 
     ########## DEV only ##########
 
-    threshold = 0.60
-
-
+    threshold = 0.70
 
     # manually set known value for input size of the model --> dataset specific
     model = DEV_ONLY_create_target_model(104)
@@ -384,7 +409,7 @@ def main():
 
     # train_model_with_cfs(data_path=dev_path, datafiles_with_header=True, model=model, epochs=5, threshold=threshold)
     train_model_with_cfs(data_path=dev_path, datafiles_with_header=True, model=model, epochs=5, 
-                threshold_hm_acc=threshold, mode=MODE_AUTOMATE_GEN, output_path=output_path, )
+                threshold_hm_acc=threshold, output_path=output_path, )
 
     log.info("End program")
 
