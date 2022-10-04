@@ -1,3 +1,4 @@
+from datetime import datetime
 import dice_ml
 from dice_ml.utils.exception import UserConfigValidationException
 import inquirer
@@ -48,23 +49,27 @@ def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, 
             log.debug("Found \"corrected_counterfactuals.csv\".")
 
     # general output paths + creation
-    OUTPUT_PATH = Path(output_path)
-    if not OUTPUT_PATH.exists() or not OUTPUT_PATH.is_dir():
-        log.critical(f"{OUTPUT_PATH} was provided as output path. Path is not valid. Please check your input. The program will exit now.")
+    if not Path(output_path).exists() or not Path(output_path).is_dir():
+        log.critical(f"{Path(output_path)} was provided as output path. Path is not valid. Please check your input. The program will exit now.")
         log.critical("Exit program")
         exit()
-    log.debug(f"Set output path: {OUTPUT_PATH}.")
+    
+    folder_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    OUTPUT_PATH = Path(output_path) / f"{DATA_PATH.name}_{folder_timestamp}"
+    log.debug(f"Create output directory {OUTPUT_PATH} in {Path(output_path)}.")
+    OUTPUT_PATH.mkdir()    
 
-    MODEL_OUTPUT_PATH = output_path / "models"
-    if not MODEL_OUTPUT_PATH.exists():
-        MODEL_OUTPUT_PATH.mkdir(parents=True)
+    # create model output path 
+    MODEL_OUTPUT_PATH = OUTPUT_PATH / "models"
+    MODEL_OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
     
     # output files paths
     cf_file = OUTPUT_PATH / "counterfactuals.csv"
+    cf_proba_file = OUTPUT_PATH / "counterfactual_probabilities"
     no_cf_instances_file = OUTPUT_PATH / "instances_without_counterfactual.csv"
-    model_logfile = OUTPUT_PATH / "model_performance.txt"
+    model_logfile = MODEL_OUTPUT_PATH / "model_performance"
 
-    file_list = [cf_file, no_cf_instances_file, model_logfile]
+    file_list = [cf_file, cf_proba_file, no_cf_instances_file]
 
     # clear file content
     for file in file_list:
@@ -145,8 +150,11 @@ def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, 
     # contains corrected cfs with features NOT encoded (still in categorical format)
     corrected_cfs = []
     cf_count = 0
+
+    corrected_cfs_proba = []
     
-    train_and_log_target_model(model, model_logfile, MODEL_OUTPUT_PATH, X_train, y_train, X_test, y_test, len(corrected_cfs))
+    train_and_log_target_model(model=model, model_logfile=model_logfile, model_output=MODEL_OUTPUT_PATH, X_train=X_train, y_train=y_train, 
+                                X_test=X_test, y_test=y_test, cf_count=len(corrected_cfs))
 
     # epochs
     for epoch in range(epochs):
@@ -159,9 +167,9 @@ def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, 
 
         # generate counterfactuals and save in counterfactuals list
         for index in range(X_train.shape[0]):
-            log.debug(f"Current instance index: {index} (training sample {index +1}).")
-            # if index == 100:
-            #     break
+            log.debug(f"Index of current instance: {index}.")
+            if index == 100:
+                break
 
             # get current instance (only X_data, no y/label)
             current_instance_enc = X_train.iloc[[index]]
@@ -201,7 +209,7 @@ def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, 
                     log.debug(f"Counterfactual at index {cf_index} was not valid. Next counterfactual in the list is tested.")
             
             # if no valid counterfactual was found, skip to next training instance
-            if counterfactual_enc.empty == True:
+            if type(counterfactual_enc) != pd.DataFrame:
                 log.critical("No valid counterfactual found. Continue with next training sample.")
                 continue
 
@@ -286,6 +294,7 @@ def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, 
 
                 # append corrected counterfactual to counterfactual list
                 corrected_cfs.append(cf_for_training)
+                corrected_cfs_proba.append(weighted_probabs[weighted_probabs_pred])
 
         # add new counterfactuals to dataset if new CFs were created
         if len(corrected_cfs) > cf_count:
@@ -308,11 +317,16 @@ def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, 
             cf_count = len(corrected_cfs)
 
         # train model with new dataset
-        train_and_log_target_model(model, model_logfile, MODEL_OUTPUT_PATH ,X_train, y_train, X_test, y_test, epoch+1, cf_count)
+        train_and_log_target_model(model=model, model_logfile=model_logfile, model_output=MODEL_OUTPUT_PATH, X_train=X_train, y_train=y_train, 
+                                    X_test=X_test, y_test=y_test, epoch=epoch+1, cf_count=cf_count)
     
     # write all (corrected) counterfactuals used for training to a file
     cfs_df = pd.concat(corrected_cfs, axis=0, ignore_index=True)
     cfs_df.to_csv(path_or_buf=cf_file, mode="w", header=True, index=False, encoding="utf-8")
+
+    with open(file=cf_proba_file, mode="w", encoding="utf-8") as f:
+        for p in corrected_cfs_proba:
+            f.write(f"{p}\n")
 
     log.info("Finished training the target model")
 
@@ -337,25 +351,25 @@ def train_and_log_target_model(model, model_logfile: Path, model_output: Path(),
     model.fit(X_train, y_train)
     score = model.score(X_test, y_test)
 
+    model_timestamp = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
     # write target model performance to file        
     with open(file=model_logfile, mode="a", encoding="utf-8") as file:
         if epoch == 0:
-            file.write("##### Initial fit #####\n")
-            file.write(str(model))
+            file.write(f"{model_timestamp}\n##### Initial fit #####\n{str(model)}")
         else:
-            file.write(f"\n\n##### Epoch {epoch} #####")
+            file.write(f"\n\n{model_timestamp}\n##### Epoch {epoch} #####")
 
         file.write(f"\nmean accuracy of model: {score}")
 
         if mode == MODE_AUTOMATE_GEN:
-            file.write(f"\nCurrent number of counterfactual to correct (and used for training): {cf_count}")
+            file.write(f"\nCurrent number of counterfactual to correct (and also used for training): {cf_count}")
         else:
             file.write(f"\nCurrent number of counterfactual used for training: {cf_count}")
 
     # save model to disk
-    out_filename = model_output / f"model{epoch}.joblib"
+    out_filename = model_output / f"model_{epoch}"
     dump(model, out_filename)
-
 
 
 def DEV_ONLY_create_target_model(feature_count):
@@ -399,7 +413,7 @@ def main():
 
     ########## DEV only ##########
 
-    threshold = 0.60
+    threshold = 0.55
 
     # manually set known value for input size of the model --> dataset specific
     model = DEV_ONLY_create_target_model(104)
