@@ -168,8 +168,8 @@ def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, 
         # generate counterfactuals and save in counterfactuals list
         for index in range(X_train.shape[0]):
             log.debug(f"Index of current instance: {index}.")
-            if index == 100:
-                break
+            # if index == 100:
+            #     break
 
             # get current instance (only X_data, no y/label)
             current_instance_enc = X_train.iloc[[index]]
