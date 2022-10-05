@@ -26,6 +26,16 @@ def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, 
         log.critical("Providing a header in your data files is vital in order for the human expert to validate the counterfactual examples in an appropriate time. Please provide a header in your files.")
         log.critical("Exit program")
         exit()
+    
+    # validate threshold
+    if isinstance(threshold_hm_acc, float):
+        if not threshold_hm_acc == round(threshold_hm_acc, 3):
+            log.warning(f"The provided threshold {threshold_hm_acc} will be rounded to three decimals. New threshold: {round(threshold_hm_acc, 3)}.")
+        threshold_hm_acc = round (threshold_hm_acc, 3)
+    else:
+        log.critical(f"The provided threshold was not valid. Value: {threshold_hm_acc}. Expected value of type float.")
+        log.critical("Exit program")
+        exit()
 
     log.info(f"Number of rounds: {epochs}")
 
@@ -55,7 +65,7 @@ def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, 
         exit()
     
     folder_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    OUTPUT_PATH = Path(output_path) / f"{DATA_PATH.name}_{folder_timestamp}"
+    OUTPUT_PATH = Path(output_path) / f"{DATA_PATH.name}_{folder_timestamp}_t-"
     log.debug(f"Create output directory {OUTPUT_PATH} in {Path(output_path)}.")
     OUTPUT_PATH.mkdir()    
 
