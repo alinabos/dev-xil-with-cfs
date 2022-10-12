@@ -14,110 +14,37 @@ from src.helper_models import init_helper_models
 MODE_AUTOMATE_GEN = "automate_gen"      # automate + generate counterfactuals that user should correct
 MODE_AUTOMATE_TRAIN = "automate_train"  # automate + read corrected counterfactuals from file
 MODE_INTERACTIVE = "interactive"        # interactive (counterfactuals are corrected live while training)
+modes = [MODE_AUTOMATE_GEN, MODE_AUTOMATE_TRAIN, MODE_INTERACTIVE]
 
-mode = MODE_AUTOMATE_GEN
-SEED = 42
 
-def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, epochs: int, threshold_hm_acc: float, output_path=Path()):
+def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, epochs: int, threshold_hm_acc: float, output_path: Path, use_timestamp: bool, seed: int, mode: str):
 
     # validate user input
-    # if datafiles contain no header, give user the option to exit program
-    if datafiles_with_header is False:
-        log.critical("Providing a header in your data files is vital in order for the human expert to validate the counterfactual examples in an appropriate time. Please provide a header in your files.")
-        log.critical("Exit program")
-        exit()
-    
-    # validate threshold
-    if isinstance(threshold_hm_acc, float):
-        if not threshold_hm_acc == round(threshold_hm_acc, 3):
-            log.warning(f"The provided threshold {threshold_hm_acc} will be rounded to three decimals. New threshold: {round(threshold_hm_acc, 3)}.")
-        threshold_hm_acc = round (threshold_hm_acc, 3)
-    else:
-        log.critical(f"The provided threshold was not valid. Value: {threshold_hm_acc}. Expected value of type float.")
-        log.critical("Exit program")
-        exit()
+    DATA_PATH, MODEL_OUTPUT_PATH, output_file_list = process_arguments(data_path, datafiles_with_header, epochs, threshold_hm_acc, output_path, use_timestamp, mode)
+    CORRECTED_CF_FILE = check_counterfactual_file(DATA_PATH, mode)
+    SEED = seed
 
-    log.info(f"Number of rounds: {epochs}")
+    # set file names
+    cf_file = output_file_list[0]
+    cf_proba_file = output_file_list[1]
+    no_cf_instances_file = output_file_list[2]
+    model_logfile = output_file_list[3]
 
-    # data paths
-    DATA_PATH = Path(data_path)
-    if not DATA_PATH.exists() or not DATA_PATH.is_dir():
-        log.critical(f"{DATA_PATH} was provided as data path. Path is not valid. Please check your input. The program will exit now.")
-        log.critical("Exit program")
-        exit()
-    log.debug(f"Set data path: {DATA_PATH}.")
-
-    # path to file containing corrected counterfactuals
-    CORRECTED_CF_FILE = DATA_PATH / "corrected_counterfactuals.csv"
-
-    if mode == MODE_AUTOMATE_TRAIN:
-        if not CORRECTED_CF_FILE.exists() or not CORRECTED_CF_FILE.is_file():
-            log.critical(f"Corrected counterfactuals are expected to be in {CORRECTED_CF_FILE} but this is not valid. Please make sure that the counterfactuals are in a file named \"corrected_counterfactuals.csv\" in the data path you provide. The program will exit now.")
-            log.critical("Exit program")
-            exit()
-        else:
-            log.debug("Found \"corrected_counterfactuals.csv\".")
-
-    # general output paths + creation
-    if not Path(output_path).exists() or not Path(output_path).is_dir():
-        log.critical(f"{Path(output_path)} was provided as output path. Path is not valid. Please check your input. The program will exit now.")
-        log.critical("Exit program")
-        exit()
-    
-    folder_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    OUTPUT_PATH = Path(output_path) / f"{DATA_PATH.name}_{folder_timestamp}_t-"
-    log.debug(f"Create output directory {OUTPUT_PATH} in {Path(output_path)}.")
-    OUTPUT_PATH.mkdir()    
-
-    # create model output path 
-    MODEL_OUTPUT_PATH = OUTPUT_PATH / "models"
-    MODEL_OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
-    
-    # output files paths
-    cf_file = OUTPUT_PATH / "counterfactuals.csv"
-    cf_proba_file = OUTPUT_PATH / "counterfactual_probabilities"
-    no_cf_instances_file = OUTPUT_PATH / "instances_without_counterfactual.csv"
-    model_logfile = MODEL_OUTPUT_PATH / "model_performance"
-
-    file_list = [cf_file, cf_proba_file, no_cf_instances_file]
-
-    # clear file content
-    for file in file_list:
-        if file.is_file():
-            open(file=file, mode="w", encoding="utf-8").close()
-
-    # read dataset from data_path (assuming ".data" and ".test" as file endings)
-    data_files = sorted([str(file.name) for file in Path(DATA_PATH).glob("*.data")], key=str.lower)
-    data_file = data_files[0]
-    log.debug(f"Found the following \".data\" files: {data_files}")
-
-    test_files = sorted([str(file.name) for file in Path(DATA_PATH).glob("*.test")], key=str.lower)
-    test_file = test_files[0]
-    log.debug(f"Found the following \".test\" files: {test_files}")
-
-    # treat first line of files as header and read data from files
-    header = 0
-    log.debug(f"Read training data from {DATA_PATH / data_file}")
-    raw_training_data = pd.read_csv(DATA_PATH / data_file, header=header, skipinitialspace=True)
-
-    log.debug(f"Read test data from {DATA_PATH / test_file}")
-    raw_test_data = pd.read_csv(DATA_PATH / test_file, header=header, skipinitialspace=True)
+    # read data from data path
+    raw_training_data, raw_test_data = read_datasets_from_datapath(DATA_PATH)
 
     # preprocess data
     data_processor = TabularDatasetProcessor(raw_training_data)
 
     # read corrected counterfactuals from file
-    corrected_cfs_from_file = None
-    if mode == MODE_AUTOMATE_TRAIN:
-        if CORRECTED_CF_FILE.stat().st_size == 0:
-            log.critical(f"{CORRECTED_CF_FILE} is empty. Please proved counterfactuals or start program in a different mode. The program will exit now.")
-            log.critical("Exit program")
-            exit()
-        corrected_cfs_from_file = read_corrected_cfs_from_file(path=CORRECTED_CF_FILE, data_header=data_processor.initial_features)
+    corrected_cfs_from_file = get_corrected_cfs_from_file(file=CORRECTED_CF_FILE, mode=mode, header=data_processor.initial_features)
 
     # get encoded training and test data
     training_data_enc = data_processor.data
     test_data_enc = data_processor.preprocess_data(raw_test_data)
+
+    # validate threshold against number of classes found
+    validate_threshold_against_classes(threshold_hm_acc, data_processor.label_encoder.classes_)
 
     log.debug(f"Training data shape: {training_data_enc.shape}")
     log.debug(f"Test data shape: {test_data_enc.shape}")
@@ -164,11 +91,11 @@ def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, 
     corrected_cfs_proba = []
     
     train_and_log_target_model(model=model, model_logfile=model_logfile, model_output=MODEL_OUTPUT_PATH, X_train=X_train, y_train=y_train, 
-                                X_test=X_test, y_test=y_test, cf_count=len(corrected_cfs))
+                                X_test=X_test, y_test=y_test, cf_count=len(corrected_cfs), mode=mode)
 
     # epochs
     for epoch in range(epochs):
-        log.info(f"Start round {epoch+1} of {epochs}.")
+        log.info(f"Start epoch {epoch+1} of {epochs}.")
 
         # set up explainer (updated every epoch because model changes, too)
         dice_data = dice_ml.Data(dataframe=training_data_enc, continuous_features=data_processor.numerical_features, outcome_name=data_processor.target_name)
@@ -178,8 +105,8 @@ def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, 
         # generate counterfactuals and save in counterfactuals list
         for index in range(X_train.shape[0]):
             log.debug(f"Index of current instance: {index}.")
-            # if index == 100:
-            #     break
+            if index == 100:
+                break
 
             # get current instance (only X_data, no y/label)
             current_instance_enc = X_train.iloc[[index]]
@@ -258,14 +185,14 @@ def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, 
                 # MODE_INTERACTIVE: generate user prompts
                 if mode == MODE_INTERACTIVE:
                     # check with user if counterfactual needs to be corrected at all
-                    question = [
+                    question_edit = [
                         inquirer.Confirm(name="needs_editing", 
                                         message="Would you like to edit the values of the instance above?",
                                         default=True)
                     ]
-                    answer = inquirer.prompt(question)
+                    answer_edit = inquirer.prompt(question_edit)
 
-                    if answer["needs_editing"] == True:
+                    if answer_edit["needs_editing"] == True:
                         question_cf = []
 
                         # generate prompt for features
@@ -312,6 +239,7 @@ def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, 
 
             # build one dataframe from list of one-row dataframes and apply encoding
             new_cfs_df = pd.concat(corrected_cfs[cf_count:], axis=0, ignore_index=True)
+            new_cfs_df.reset_index(drop=True, inplace=True)
             new_cfs_df_enc = data_processor.transform_features_and_target(new_cfs_df)
 
             # split counterfactual data in X and y data
@@ -328,7 +256,7 @@ def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, 
 
         # train model with new dataset
         train_and_log_target_model(model=model, model_logfile=model_logfile, model_output=MODEL_OUTPUT_PATH, X_train=X_train, y_train=y_train, 
-                                    X_test=X_test, y_test=y_test, epoch=epoch+1, cf_count=cf_count)
+                                    X_test=X_test, y_test=y_test, epoch=epoch+1, cf_count=cf_count, mode=mode)
     
     # write all (corrected) counterfactuals used for training to a file
     cfs_df = pd.concat(corrected_cfs, axis=0, ignore_index=True)
@@ -340,22 +268,14 @@ def train_model_with_cfs(data_path: Path(), datafiles_with_header: bool, model, 
 
     log.info("Finished training the target model")
 
-def read_corrected_cfs_from_file(path: Path, data_header: list) -> pd.DataFrame:
-    raw_data = pd.read_csv(path, header=0, skipinitialspace=True)
-    if not raw_data.columns == data_header:
-        log.critical(f"Header of {path} does not match dataset header. Please adapt the files. The program will exit now.")
-        exit()
-    return raw_data
 
-
-def split_data_in_xy(dataset: pd.DataFrame):
-    X_data = dataset[dataset.columns[0:-1]]
-    y_data = dataset[dataset.columns[-1]]
-    return X_data,y_data
+def validate_number(_, current) -> bool:
+    current = float(current)
+    return isinstance(current, float)
 
 
 def train_and_log_target_model(model, model_logfile: Path, model_output: Path(), X_train: pd.DataFrame, 
-                y_train: pd.Series, X_test: pd.DataFrame, y_test: pd.Series, cf_count: int, epoch=0):
+                y_train: pd.Series, X_test: pd.DataFrame, y_test: pd.Series, cf_count: int, mode: str, epoch=0):
     # train target model
     log.debug("Fitting target model")
     model.fit(X_train, y_train)
@@ -380,19 +300,176 @@ def train_and_log_target_model(model, model_logfile: Path, model_output: Path(),
     # save model to disk
     out_filename = model_output / f"model_{epoch}"
     dump(model, out_filename)
+    
+
+def split_data_in_xy(dataset: pd.DataFrame):
+    X_data = dataset[dataset.columns[0:-1]]
+    y_data = dataset[dataset.columns[-1]]
+    return X_data,y_data
 
 
-def DEV_ONLY_create_target_model(feature_count):
+def validate_threshold_against_classes(threshold: float, classes: np.ndarray):
+    if threshold < 1/len(classes):
+        log.critical(f"Provided threshold ({threshold}) is not valid. It has to be larger than 1/(number of classes) - meaning larger than pure chance. Number of classes found: {len(classes)} ({classes}). The program will exit now.")
+        log.critical("Exit program")
+        exit()
+
+
+def get_corrected_cfs_from_file(file: Path(), mode: str, header: list):
+    corrected_cfs_from_file = None
+    if mode == MODE_AUTOMATE_TRAIN:
+        if file.stat().st_size == 0:
+            log.critical(f"{file} is empty. Please proved counterfactuals or start program in a different mode. The program will exit now.")
+            log.critical("Exit program")
+            exit()
+
+        corrected_cfs_from_file = pd.read_csv(file, header=0, skipinitialspace=True)
+        if not corrected_cfs_from_file.columns == header:
+            log.critical(f"Header of {file} does not match dataset header. Please adapt the files. The program will exit now.")
+            exit()
+    return corrected_cfs_from_file
+
+
+def read_datasets_from_datapath(DATA_PATH):
+    # read dataset from data_path (assuming ".data" and ".test" as file endings)
+    data_files = sorted([str(file.name) for file in Path(DATA_PATH).glob("*.data")], key=str.lower)
+    data_file = data_files[0]
+    log.debug(f"Found the following \".data\" files: {data_files}")
+
+    test_files = sorted([str(file.name) for file in Path(DATA_PATH).glob("*.test")], key=str.lower)
+    test_file = test_files[0]
+    log.debug(f"Found the following \".test\" files: {test_files}")
+
+    # treat first line of files as header and read data from files
+    header = 0
+    log.debug(f"Read training data from {DATA_PATH / data_file}")
+    raw_training_data = pd.read_csv(DATA_PATH / data_file, header=header, skipinitialspace=True)
+
+    log.debug(f"Read test data from {DATA_PATH / test_file}")
+    raw_test_data = pd.read_csv(DATA_PATH / test_file, header=header, skipinitialspace=True)
+    return raw_training_data,raw_test_data
+
+
+def check_counterfactual_file(data_path: Path, mode: str) -> Path:
+
+    # path to file containing corrected counterfactuals
+    corrected_cf_file = data_path / "corrected_counterfactuals.csv"
+
+    if mode == MODE_AUTOMATE_TRAIN:
+        if not corrected_cf_file.exists() or not corrected_cf_file.is_file():
+            log.critical(f"Corrected counterfactuals are expected to be in {corrected_cf_file} but this is not valid. Please make sure that the counterfactuals are in a file named \"corrected_counterfactuals.csv\" in the data path you provide. The program will exit now.")
+            log.critical("Exit program")
+            exit()
+        else:
+            log.debug("Found \"corrected_counterfactuals.csv\".")
+
+    return corrected_cf_file
+
+
+def process_arguments(data_path, datafiles_with_header, epochs, threshold_hm_acc, output_path, use_timestamp, mode) -> tuple[Path, Path, list]:
+
+    # validate data paths
+    data_path = Path(data_path)
+    if not data_path.exists() or not data_path.is_dir():
+        log.critical(f"{data_path} was provided as data path. Path is not valid. Please check your input. The program will exit now.")
+        log.critical("Exit program")
+        exit()
+    log.debug(f"Set data path: {data_path}.")
+
+    # if datafiles contain no header, give user the option to exit program
+    if datafiles_with_header is False:
+        log.critical("Providing a header in your data files is vital in order for the human expert to validate the counterfactual examples in an appropriate time. Please provide a header in your files. Program will exit now.")
+        log.critical("Exit program")
+        exit()
+
+    log.info(f"Number of epochs: {epochs}")
+
+    # validate threshold
+    if threshold_hm_acc > 1 or threshold_hm_acc < 0:
+        log.critical(f"Threshold must have a value between 0 and 1. Given value: {threshold_hm_acc}. Please provide a valid threshold. Program will exit now.")
+        log.critical("Exit program")
+        exit()
+
+    # validate output path
+    output_path = Path(output_path)
+    if not output_path.exists() or not output_path.is_dir():
+        log.critical(f"{output_path} does not exist.")
+
+        # check with user if output path should be created
+        question_op = [
+        inquirer.Confirm(name="create_output_path", 
+                        message=f"Would you like to create the output path: {output_path}?",
+                        default=True)
+        ]
+        answer_op = inquirer.prompt(question_op)
+
+        # if yes, create directory, else exit program
+        if answer_op["create_output_path"] == True:
+            output_path.mkdir(parents=True, exist_ok=True)
+        else:
+            log.critical("Output path will not be created. Program will exit now.")
+            log.critical("Exit program")
+            exit()
+    log.debug(f"Set output path: {output_path}.")
+
+    # create output folder for dataset and timestamp
+    if use_timestamp == True:
+        folder_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        output_folder = Path(output_path) / f"{data_path.name}_{folder_timestamp}"
+        log.debug(f"Create output directory {output_folder} in {Path(output_path)}.")
+        output_folder.mkdir()  
+    else:
+        output_folder = Path(output_path) / f"{data_path.name}"
+        if output_folder.is_dir():
+            log.critical(f"Output folder {output_folder} already exists. Files in this directory will be overwritten if you continue.")
+
+            # check with user if output path should be created
+            question_overwrite = [
+            inquirer.Confirm(name="overwrite_files", 
+                            message=f"Output folder {output_folder} already exists. Files in this directory will be overwritten if you continue. Continue?",
+                            default=False)
+            ]
+            answer_overwrite = inquirer.prompt(question_overwrite)
+
+            if answer_overwrite["overwrite_files"] == False:
+                log.critical("User input: Do not continue. Program will exit now.")
+                log.critical("Exit program")
+                exit()
+  
+    # create model output path 
+    model_output_path = output_folder / "models"
+    model_output_path.mkdir(parents=True, exist_ok=True)
+
+    # output files paths
+    cf_file = output_folder / "counterfactuals.csv"
+    cf_proba_file = output_folder / "counterfactual_probabilities"
+    no_cf_instances_file = output_folder / "instances_without_counterfactual.csv"
+    model_logfile = model_output_path / "model_performance"
+
+    file_list = [cf_file, cf_proba_file, no_cf_instances_file]
+
+    # clear file content
+    for file in file_list:
+        if file.is_file():
+            open(file=file, mode="w", encoding="utf-8").close()
+
+    file_list.append(model_logfile)
+
+    # validate mode
+    if mode not in modes:
+        log.critical(f"Mode ({mode}) is not valid. Program will exit now.")
+        log.critical("Exit program")
+        exit()
+
+    return data_path, model_output_path, file_list
+
+
+def DEV_ONLY_create_target_model(feature_count, seed):
     hidden_layer1_size = round(feature_count*(1.3))
     hidden_layer2_size = round(hidden_layer1_size/3)
     model = MLPClassifier(hidden_layer_sizes=(hidden_layer1_size, hidden_layer2_size),
-                          activation="relu", solver="adam", random_state=SEED)
+                          activation="relu", solver="adam", random_state=seed)
     return model
-
-
-def validate_number(_, current) -> bool:
-    current = float(current)
-    return isinstance(current, float)
 
 
 def main():
@@ -403,12 +480,25 @@ def main():
     # optional arguments: data_folder, counterfactual generator, rounds
     # technical optional arguments: seed, log-level
 
-    # dev_path = Path()/"data"/"adult_income"/"small"
+    ###########################
+
+    # user arguments
+    mode = MODE_AUTOMATE_GEN
     dev_path = Path()/"data"/"adult_income"
+    file_with_header = True
+    seed = 42
+    model = DEV_ONLY_create_target_model(104, seed)   # manually set known value for input size of the model --> dataset specific
+    epochs = 5
+    threshold = 0.70
     output_path = Path()/"output"
-    output_path.mkdir(parents=True, exist_ok=True)
+    use_timestamp = False
+    mode = MODE_AUTOMATE_GEN
+
+    ###########################
+
 
     logfile = output_path / "logfile"
+
     # clear logfile
     if logfile.is_file():
         open(file=logfile, mode="w", encoding="utf-8").close()
@@ -418,22 +508,12 @@ def main():
                     format="%(asctime)s %(levelname)s: %(message)s", 
                     datefmt="%d/%m/%Y %H:%M",
                     level=log.DEBUG)
+
+
     log.info("Start program")
-    log.debug(f"Seed: {SEED}")
 
-    ########## DEV only ##########
-
-    threshold = 0.55
-
-    # manually set known value for input size of the model --> dataset specific
-    model = DEV_ONLY_create_target_model(104)
-
-    ########## DEV only ##########
-
-
-    # train_model_with_cfs(data_path=dev_path, datafiles_with_header=True, model=model, epochs=5, threshold=threshold)
-    train_model_with_cfs(data_path=dev_path, datafiles_with_header=True, model=model, epochs=5, 
-                threshold_hm_acc=threshold, output_path=output_path, )
+    train_model_with_cfs(mode=mode, data_path=dev_path, datafiles_with_header=file_with_header, model=model, epochs=epochs, 
+                threshold_hm_acc=threshold, output_path=output_path, use_timestamp=use_timestamp, seed=seed)
 
     log.info("End program")
 

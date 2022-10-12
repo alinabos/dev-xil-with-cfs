@@ -7,8 +7,10 @@ class TabularDatasetProcessor():
     def __init__(self, raw_data: pd.DataFrame):
         """Initialize processor for tabular datasets, start preprocessing of the input raw_data and fit encoder for transforming categorical features
 
-        Args:
-            raw_data (pandas.DataFrame): unpreprocessed data that was read from e.g. a csv file
+        Parameters
+        ----------
+        raw_data : pd.DataFrame
+            unpreprocessed data that was read from e.g. a csv file
         """
 
         self.data = None
@@ -40,6 +42,19 @@ class TabularDatasetProcessor():
 
 
     def drop_nan(self, data: pd.DataFrame) -> pd.DataFrame:
+        """drop rows with NaN values and reset row index
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            dataframe with possible NaN values
+
+        Returns
+        -------
+        pd.DataFrame
+            dataframe without rows containing NaN values
+        """
+
         data_tmp = data.dropna(axis=0, how="any")
         data_tmp.reset_index(drop=True, inplace=True)
         return data_tmp
@@ -48,11 +63,15 @@ class TabularDatasetProcessor():
     def preprocess_data(self, raw_data: pd.DataFrame) -> pd.DataFrame:
         """basic preprocessing of the training data: drop rows with NaN, OneHotEncoding of categorical data
 
-        Args:
-            raw_data (pandas.DataFrame): unpreprocessed data that was read from e.g. a csv file
+        Parameters
+        ----------
+        raw_data : pd.DataFrame
+            unpreprocessed data that was read from e.g. a csv file
 
-        Returns:
-            pandas.DataFrame: preprocessed data
+        Returns
+        -------
+        pd.DataFrame
+            preprocessed data
         """
         
         log.debug("Start preprocessing")
@@ -75,8 +94,18 @@ class TabularDatasetProcessor():
 
 
     def transform_features_and_target(self, raw_data: pd.DataFrame) -> pd.DataFrame:
-        # reset index of data to ensure concatenation results in the same rows
-        raw_data = raw_data.reset_index(drop=True)
+        """use scikit learn OneHotEncoder and LabelEncoder to encode categorical features and target
+
+        Parameters
+        ----------
+        raw_data : pd.DataFrame
+            dataframe to encode with OneHotEncoding
+
+        Returns
+        -------
+        pd.DataFrame
+            dataframe with one-hot-encoded columns and data keeping the target columns as the last column
+        """
         
         # encode categorical data and target column in One Hot Encoding
         cat_data = self.ohc_encoder.transform(raw_data[self.categorical_features])
@@ -97,6 +126,18 @@ class TabularDatasetProcessor():
     
 
     def inverse_transform_data_and_target(self, data: pd.DataFrame) -> pd.DataFrame:
+        """use inverse_transform methods of scitkit-learn's OneHotEncoder and LabelEncoder to restore categorical features and target
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            one-hot-encoded dataframe
+
+        Returns
+        -------
+        pd.DataFrame
+            inverse-transformed dataframe with categorical features and target restored
+        """
         # reset index of data to ensure concatenation results in one row
         data = data.reset_index(drop=True)
 
@@ -115,7 +156,20 @@ class TabularDatasetProcessor():
         return inv_data
 
 
+    # XXX check if method is needed
     def inverse_transform_data(self, data: pd.DataFrame) -> pd.DataFrame:
+        """use inverse_transform methods of scitkit-learn's OneHotEncoder and LabelEncoder to restore categorical features
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            one-hot-encoded dataframe
+
+        Returns
+        -------
+        pd.DataFrame
+            inverse-transformed dataframe with categorical features restored
+        """
         # reset index of data to ensure concatenation results in one row
         data = data.reset_index(drop=True)
         

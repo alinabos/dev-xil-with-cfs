@@ -4,23 +4,20 @@ from sklearn.neural_network import MLPClassifier
 # from sklearn.svm import LinearSVC
 
 # models should be for binary and multi-class classification
-def init_helper_models(n_features: int, seed: int):
-    """
-    initializes three helper models with standard configuration: GradientBoosting, MLP, RandomForest
+def init_helper_models(n_features: int, seed: int) -> list:    
+    """initializes three helper models with standard configuration: GradientBoosting, MLP, RandomForest
 
     Parameters
     ----------
-    n_features: int
+    n_features : int
         number of features (= input layer size for MLP)
-
-    seed: int
+    seed : int
         for setting the random state of the helper models
 
     Returns
     -------
     list
         list containing the helper models
-    
     """
     
     HELPER_MODELS = []
